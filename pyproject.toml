@@ -1,15 +1,19 @@
 [project]
 name = "ComfyUI-Qwen3-ASR"
-description = "Qwen3 ASR model custom node for ComfyUI."
-version = "1.0.2"
-license = "LICENSE.md"
+description = "ComfyUI nodes for Qwen3-ASR (0.6B/1.7B) and ForcedAligner. Supports high-accuracy ASR and language identification for 52 languages/dialects, including 22 Chinese dialects and various English accents. Features word-level timestamps, long audio transcription, and VRAM-optimized inference."
+version = "1.0.3"
+license = { file = "LICENSE.md" }
 dependencies = ["torch", "numpy", "qwen-asr", "transformers", "accelerate"]
 
 [project.urls]
 Repository = "https://github.com/kaushiknishchay/ComfyUI-Qwen3-ASR"
+Documentation = "https://github.com/kaushiknishchay/ComfyUI-Qwen3-ASR/wiki"
+"Bug Tracker" = "https://github.com/kaushiknishchay/ComfyUI-Qwen3-ASR/issues"
 #  Used by Comfy Registry https://comfyregistry.org
+
+requires-python = ">=3.8"        # Python 3.8 or higher
 
 [tool.comfy]
 PublisherId = "kaushik"
 DisplayName = "ComfyUI-Qwen3-ASR"
-Icon = ""
+Icon = "https://raw.githubusercontent.com/kaushiknishchay/ComfyUI-Qwen3-ASR/refs/heads/main/assets/logo.png"
