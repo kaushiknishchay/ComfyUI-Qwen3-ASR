@@ -153,6 +153,7 @@ class Qwen3ASRTranscriber:
                 "audio": ("AUDIO", {"tooltip": "The input audio to be transcribed."}),
                 "model_name": (get_qwen_model_list(), {"tooltip": "The Qwen3 ASR model to use for transcription."}),
                 "language": (["auto"] + SUPPORTED_LANGUAGES, {"default": "auto", "tooltip": "The language of the audio. Set to 'auto' for automatic language detection."}),
+                "device": (["cuda", "cpu"], {"default": "cuda", "tooltip": "The device to run the ASR model on."}),
                 "precision": (["bf16", "fp16", "fp32"], {"default": "bf16", "tooltip": "The numerical precision to use for the ASR model."}),
                 "max_new_tokens": ("INT", {"default": 256, "min": 1, "max": 4096, "tooltip": "The maximum number of tokens to generate in the transcription."}),
                 "flash_attention_2": ("BOOLEAN", {"default": False, "tooltip": "Enable Flash Attention 2 for faster inference and lower VRAM usage."}),
