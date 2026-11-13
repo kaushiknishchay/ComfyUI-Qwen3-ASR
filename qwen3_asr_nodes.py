@@ -1,5 +1,6 @@
 import torch
 import gc
+import traceback
 import numpy as np
 import os
 import torch.nn.functional as F
@@ -8,8 +9,38 @@ import comfy.utils
 from comfy import model_management
 from qwen_asr import Qwen3ASRModel
 
-# Global cache for models to prevent reloading
+# Model cache. Entries are released at the end of EVERY transcribe() call,
+# so no model stays resident on the GPU between prompts. The dict is kept
+# only so the loading code below stays unchanged.
 _QWEN3_MODEL_CACHE = {}
+
+
+def _release_qwen_models():
+    """Drop every ASR model reference and return cached CUDA blocks to the driver.
+
+    This node loads with AutoModel.from_pretrained(device_map=...) directly and
+    never registers a ModelPatcher, so ComfyUI's unload_all_models(), the
+    "Free model and node cache" button and idle GC cannot see these models.
+    Releasing explicitly is the only way to give the VRAM back.
+
+    Called from a finally block: covers normal return, exceptions, OOM and
+    ComfyUI's Cancel / InterruptProcessingException alike.
+    """
+    _QWEN3_MODEL_CACHE.clear()
+    gc.collect()
+    if not model_management.cpu_mode() and torch.cuda.is_initialized():
+        # cuBLAS / cuDNN keep a small workspace inside a large allocator
+        # segment after generate(). empty_cache() alone cannot return that
+        # segment, leaving ~1.1 GiB of VRAM "reserved but unused". Clearing
+        # the workspaces first lets the whole segment go back to the driver.
+        torch.cuda.synchronize()
+        try:
+            torch._C._cuda_clearCublasWorkspaces()
+        except Exception:
+            pass  # private API; harmless if a future torch removes it
+        gc.collect()
+        # synchronize + torch.cuda.empty_cache() + ipc_collect()
+        model_management.soft_empty_cache()
 
 SUPPORTED_LANGUAGES = [
     "Chinese",
@@ -122,7 +153,6 @@ class Qwen3ASRTranscriber:
                 "audio": ("AUDIO", {"tooltip": "The input audio to be transcribed."}),
                 "model_name": (get_qwen_model_list(), {"tooltip": "The Qwen3 ASR model to use for transcription."}),
                 "language": (["auto"] + SUPPORTED_LANGUAGES, {"default": "auto", "tooltip": "The language of the audio. Set to 'auto' for automatic language detection."}),
-                "device": (["cuda", "cpu"], {"default": "cuda", "tooltip": "The device to run the ASR model on."}),
                 "precision": (["bf16", "fp16", "fp32"], {"default": "bf16", "tooltip": "The numerical precision to use for the ASR model."}),
                 "max_new_tokens": ("INT", {"default": 256, "min": 1, "max": 4096, "tooltip": "The maximum number of tokens to generate in the transcription."}),
                 "flash_attention_2": ("BOOLEAN", {"default": False, "tooltip": "Enable Flash Attention 2 for faster inference and lower VRAM usage."}),
@@ -141,15 +171,22 @@ class Qwen3ASRTranscriber:
 
     def transcribe(self, audio, model_name, language, device, precision, max_new_tokens, flash_attention_2, chunk_size, overlap, forced_aligner=None):
         global _QWEN3_MODEL_CACHE
-        
+
+        # Local strong references start as None. The finally block resets them
+        # before gc.collect(), otherwise this frame keeps the model alive.
+        model = None
+        results = None
+        res = None
+
         # Support for ComfyUI interruption (Cancel button)
         model_management.throw_exception_if_processing_interrupted()
 
-        # Heuristic: If ComfyUI has cleared its internal model registry, 
-        # we should clear our custom cache to respect the "Clear Cache" action.
-        if len(model_management.current_loaded_models) == 0 and len(_QWEN3_MODEL_CACHE) > 0:
-            print("[Qwen3-ASR] ComfyUI cache clear detected. Purging ASR models...")
-            _QWEN3_MODEL_CACHE.clear()
+        # Never inherit a model from a previous prompt. The old
+        # "len(current_loaded_models) == 0" heuristic almost never fired,
+        # because smart memory keeps ComfyUI models registered after a prompt.
+        if _QWEN3_MODEL_CACHE:
+            print("[Qwen3-ASR] Purging stale ASR model cache before load...")
+            _release_qwen_models()
 
         dtype_map = {
             "bf16": torch.bfloat16,
@@ -284,22 +321,32 @@ class Qwen3ASRTranscriber:
                 else:
                     timestamp_output = "No timestamps generated."
 
-            # If in NO_VRAM mode, don't keep the model in cache after execution
-            if model_management.vram_state == model_management.VRAMState.NO_VRAM:
-                print("[Qwen3-ASR] NO_VRAM mode: Purging model after use.")
-                _QWEN3_MODEL_CACHE.pop(cache_key, None)
-                model_management.soft_empty_cache()
-
+            # The model lifetime ends with this call in every VRAM mode;
+            # the actual release is performed by the finally block below.
             return (transcription_text, timestamp_output)
 
-        except Exception as e:
-            if isinstance(e, model_management.InterruptProcessingException):
-                # Cleanup on interrupt
-                if model_management.vram_state == model_management.VRAMState.NO_VRAM:
-                    _QWEN3_MODEL_CACHE.pop(cache_key, None)
-                gc.collect()
-                model_management.soft_empty_cache()
+        except BaseException as exc:
+            # An in-flight exception keeps its traceback alive, and frames in
+            # that traceback (e.g. model.transcribe's `self`) still hold a
+            # strong reference to the model. Clearing frame locals releases
+            # those references while keeping filenames / line numbers, so
+            # ComfyUI can still print a useful stack trace.
+            try:
+                if exc.__traceback__ is not None:
+                    traceback.clear_frames(exc.__traceback__)
+            except Exception:
+                pass
             raise
+        finally:
+            # These assignments are essential: while this frame is alive its
+            # locals still hold strong references to the model, so the
+            # gc.collect() in _release_qwen_models() could not reclaim it.
+            # Covers normal return, exceptions, OOM and Cancel alike.
+            model = None
+            results = None
+            res = None
+            _release_qwen_models()
+            print("[Qwen3-ASR] Released ASR model, VRAM returned.")
 
 NODE_CLASS_MAPPINGS = {
     "Qwen3ASRTranscriber": Qwen3ASRTranscriber,
